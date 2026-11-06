@@ -152,6 +152,13 @@ export function ApprovalDetail() {
   const isBudgetApproval = approval.type === "budget_override_required";
   const TypeIcon = typeIcon[approval.type] ?? defaultTypeIcon;
   const showApprovedBanner = searchParams.get("resolved") === "approved" && approval.status === "approved";
+  const wakeupMessage = approval.requesterWakeup === "accepted"
+    ? "Paperclip accepted a request to resume the requesting agent. Check the linked task for execution progress."
+    : approval.requesterWakeup === "skipped"
+      ? "Paperclip skipped resuming the requesting agent. Check the linked task for blockers before retrying."
+      : approval.requesterWakeup === "failed"
+        ? "Paperclip could not resume the requesting agent. Check the linked task and ask its owner to recover the run."
+        : "No agent resume was recorded. Approval alone does not start work.";
   const primaryLinkedIssue = linkedIssues?.[0] ?? null;
   const resolvedCta =
     primaryLinkedIssue
@@ -185,7 +192,7 @@ export function ApprovalDetail() {
               <div>
                 <p className="text-sm text-green-800 dark:text-green-100 font-medium">Approval confirmed</p>
                 <p className="text-xs text-green-700 dark:text-green-200/90">
-                  Requesting agent was notified to review this approval and linked tasks.
+                  {wakeupMessage}
                 </p>
               </div>
             </div>
@@ -199,6 +206,9 @@ export function ApprovalDetail() {
             </Button>
           </div>
         </div>
+      )}
+      {!showApprovedBanner && approval.status === "approved" && (
+        <p className="text-sm text-muted-foreground" role="status">{wakeupMessage}</p>
       )}
       <div className="border border-border rounded-lg p-4 space-y-3">
         <div className="flex items-center justify-between">

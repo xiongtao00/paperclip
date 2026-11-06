@@ -54,7 +54,7 @@ const routeModules = hoistModuleGraph(registerModuleMocks, async () => {
   return { errorHandler, approvalRoutes };
 });
 
-async function createApp(actorOverrides: Record<string, unknown> = {}) {
+async function createApp(actorOverrides: Record<string, unknown> = {}, wakeupAudit: unknown[] = []) {
   const { errorHandler, approvalRoutes } = routeModules.value;
   const app = express();
   app.use(express.json());
@@ -69,12 +69,12 @@ async function createApp(actorOverrides: Record<string, unknown> = {}) {
     };
     next();
   });
-  app.use("/api", approvalRoutes(createRouteDb()));
+  app.use("/api", approvalRoutes(createRouteDb({}, "run-1", "agent-1", wakeupAudit)));
   app.use(errorHandler);
   return app;
 }
 
-function createRouteDb(contextSnapshot: Record<string, unknown> = {}, runId = "run-1", agentId = "agent-1") {
+function createRouteDb(contextSnapshot: Record<string, unknown> = {}, runId = "run-1", agentId = "agent-1", wakeupAudit: unknown[] = []) {
   const runRows = [{
     id: runId,
     companyId: "company-1",
@@ -85,6 +85,7 @@ function createRouteDb(contextSnapshot: Record<string, unknown> = {}, runId = "r
     select: vi.fn((selection: Record<string, unknown> = {}) => ({
       from: vi.fn(() => ({
         where: vi.fn(() => ({
+          orderBy: () => ({ limit: async () => wakeupAudit }),
           then: async (resolve: (rows: unknown[]) => unknown) => resolve(
             Object.keys(selection).includes("contextSnapshot") ? runRows : [],
           ),
@@ -141,6 +142,25 @@ describe("approval routes idempotent retries", () => {
     mockHeartbeatService.wakeup.mockResolvedValue({ id: "wake-1" });
     mockIssueApprovalService.listIssuesForApproval.mockResolvedValue([{ id: "issue-1" }]);
     mockLogActivity.mockResolvedValue(undefined);
+  });
+
+  it.each([
+    { audit: [], expected: "not_recorded" },
+    { audit: [{ action: "approval.requester_wakeup_queued", details: { wakeRunId: "run-2" } }], expected: "accepted" },
+    { audit: [{ action: "approval.requester_wakeup_queued", details: { wakeRunId: null } }], expected: "skipped" },
+    { audit: [{ action: "approval.requester_wakeup_skipped", details: null }], expected: "skipped" },
+    { audit: [{ action: "approval.requester_wakeup_failed", details: { error: "private diagnostic" } }], expected: "failed" },
+  ])("reports $expected without exposing the scheduling audit details", async ({ audit, expected }) => {
+    mockApprovalService.getById.mockResolvedValue({
+      id: "approval-1", companyId: "company-1", type: "request_board_approval",
+      status: "approved", decidedAt: new Date(), payload: {},
+    });
+    const app = await createApp({}, audit);
+    const response = await request(app).get("/api/approvals/approval-1");
+    expect(response.status).toBe(200);
+    expect(response.body.requesterWakeup).toBe(expected);
+    expect(response.body).not.toHaveProperty("details");
+    expect(mockHeartbeatService.wakeup).not.toHaveBeenCalled();
   });
 
   it("does not emit duplicate approval side effects when approve is already resolved", async () => {

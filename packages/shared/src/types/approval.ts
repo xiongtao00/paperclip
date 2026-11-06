@@ -11,6 +11,7 @@ export interface Approval {
   decisionNote: string | null;
   decidedByUserId: string | null;
   decidedAt: Date | null;
+  requesterWakeup?: "accepted" | "skipped" | "failed" | "not_recorded";
   createdAt: Date;
   updatedAt: Date;
 }

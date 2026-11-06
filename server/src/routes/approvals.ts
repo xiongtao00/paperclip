@@ -1,6 +1,6 @@
 import { Router, type Request } from "express";
-import { eq } from "drizzle-orm";
-import { heartbeatRuns, type Db } from "@paperclipai/db";
+import { and, desc, eq, gte, inArray } from "drizzle-orm";
+import { activityLog, heartbeatRuns, type Db } from "@paperclipai/db";
 import {
   addApprovalCommentSchema,
   createApprovalSchema,
@@ -226,7 +226,33 @@ export function approvalRoutes(
     const approval = await getAccessibleResource(req, res, svc.getById(id), "Approval not found");
     if (!approval) return;
     if (!(await assertApprovalAccessAllowed(req, res, approval.companyId))) return;
-    res.json(redactApprovalPayload(approval));
+    if (approval.status !== "approved" || !approval.decidedAt) {
+      res.json(redactApprovalPayload(approval));
+      return;
+    }
+    // Only expose the scheduling disposition; the underlying audit details
+    // can include diagnostics or references the approval reader cannot access.
+    const [attempt] = await db.select({ action: activityLog.action, details: activityLog.details })
+      .from(activityLog)
+      .where(and(
+        eq(activityLog.companyId, approval.companyId),
+        eq(activityLog.entityType, "approval"),
+        eq(activityLog.entityId, approval.id),
+        gte(activityLog.createdAt, approval.decidedAt),
+        inArray(activityLog.action, [
+          "approval.requester_wakeup_queued",
+          "approval.requester_wakeup_skipped",
+          "approval.requester_wakeup_failed",
+        ]),
+      ))
+      .orderBy(desc(activityLog.createdAt), desc(activityLog.id))
+      .limit(1);
+    const requesterWakeup = !attempt ? "not_recorded"
+      : attempt.action === "approval.requester_wakeup_failed" ? "failed"
+      : attempt.action === "approval.requester_wakeup_queued" && typeof attempt.details?.wakeRunId === "string"
+        ? "accepted"
+        : "skipped";
+    res.json({ ...redactApprovalPayload(approval), requesterWakeup });
   });
 
   router.post("/companies/:companyId/approvals", validate(createApprovalSchema), async (req, res) => {
@@ -359,7 +385,7 @@ export function approvalRoutes(
             companyId: approval.companyId,
             actorType: "user",
             actorId: req.actor.userId ?? "board",
-            action: "approval.requester_wakeup_queued",
+            action: wakeRun ? "approval.requester_wakeup_queued" : "approval.requester_wakeup_skipped",
             entityType: "approval",
             entityId: approval.id,
             details: {
