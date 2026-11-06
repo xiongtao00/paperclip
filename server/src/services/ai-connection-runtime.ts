@@ -185,8 +185,12 @@ done`,
   }
   let directory =
     typeof config.cwd === "string" ? path.resolve(config.cwd) : process.cwd();
+  // The host's Codex home is user configuration. Managed connections supply
+  // their own CODEX_HOME; the host file is not a project override.
+  const hostCodexHomeParent = provider === "openai" ? path.resolve(os.homedir()) : null;
   for (;;) {
     for (const relative of files) {
+      if (directory === hostCodexHomeParent && relative === ".codex/config.toml") continue;
       try {
         const content = await readFile(path.join(directory, relative), "utf8");
         if (
