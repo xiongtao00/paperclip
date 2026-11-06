@@ -11368,6 +11368,7 @@ export function issueService(db: Db) {
          * check) is rejected instead of released; a lock released meanwhile is fine.
          */
         expectedExecutionLock?: { executionRunId: string | null; checkoutRunId: string | null };
+        expectedReviewHandoff?: { projectId: string; fromAgentId: string; statusVersion: number };
         /** Defaults to `flatten` for parent changes. Board-user routes pass `allow_nested`. */
         parentDepthPolicy?: IssueParentDepthPolicy;
         /**
@@ -11461,6 +11462,7 @@ export function issueService(db: Db) {
         expectedExecutionPolicy,
         expectedStatusVersion,
         expectedExecutionLock,
+        expectedReviewHandoff,
         parentDepthPolicy: _parentDepthPolicy,
         expectedParentId: _expectedParentId,
         // Creation provenance never changes after create.
@@ -11777,6 +11779,13 @@ export function issueService(db: Db) {
           throw conflict("The task's execution changed while this status change was checked. Read the task again and retry.", {
             code: "issue_execution_lock_changed",
           });
+        }
+        if (expectedReviewHandoff && (receiptExisting.status !== "in_review" ||
+            receiptExisting.projectId !== expectedReviewHandoff.projectId ||
+            receiptExisting.assigneeAgentId !== expectedReviewHandoff.fromAgentId ||
+            receiptExisting.assigneeUserId || receiptExisting.statusVersion !== expectedReviewHandoff.statusVersion ||
+            receiptExisting.executionRunId || receiptExisting.checkoutRunId)) {
+          throw conflict("The review task changed or has active work. Read it again before handing it off.", { code: "issue_review_handoff_changed" });
         }
         if (issueData.executionPolicy !== undefined) assertQualityReviewPolicyMutation({ previousPolicy: receiptExisting.executionPolicy, nextPolicy: issueData.executionPolicy, actorAgentId, actorUserId });
         if ((patch.status ?? receiptExisting.status) === "done" &&

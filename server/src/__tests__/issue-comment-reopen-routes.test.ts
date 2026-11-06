@@ -641,6 +641,20 @@ describe("issue comment reopen routes", () => {
       expect.objectContaining({ payload: expect.objectContaining({ issueId: issue.id }) })));
   });
 
+  it("records operator progress without waking the current assignee", async () => {
+    const issue = makeIssue("in_review");
+    mockIssueService.getById.mockResolvedValue(issue);
+    const app = request(await installActor(createApp()));
+    const progress = await app.post(`/api/issues/${issue.id}/comments`)
+      .send({ body: "Host preflight running", notifyAgents: false });
+    expect(progress.status, JSON.stringify(progress.body)).toBe(201);
+    expect(mockIssueService.addComment).toHaveBeenCalled();
+    expect(mockHeartbeatService.wakeup).not.toHaveBeenCalled();
+    const resume = await app.post(`/api/issues/${issue.id}/comments`)
+      .send({ body: "Not a passive update", notifyAgents: false, resume: true });
+    expect(resume.status).toBe(422);
+  });
+
   it("finishes missing reference and activity writes for an accepted comment", async () => {
     const issue = makeIssue("done");
     mockIssueService.getById.mockResolvedValue(issue);

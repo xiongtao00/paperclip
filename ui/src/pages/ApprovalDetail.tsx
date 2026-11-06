@@ -154,6 +154,8 @@ export function ApprovalDetail() {
   const showApprovedBanner = searchParams.get("resolved") === "approved" && approval.status === "approved";
   const wakeupMessage = approval.requesterWakeup === "accepted"
     ? "Paperclip accepted a request to resume the requesting agent. Check the linked task for execution progress."
+    : approval.requesterWakeup === "delegated"
+      ? "This approval is for the registered host executor. Check the linked task for a run receipt."
     : approval.requesterWakeup === "skipped"
       ? "Paperclip skipped resuming the requesting agent. Check the linked task for blockers before retrying."
       : approval.requesterWakeup === "failed"

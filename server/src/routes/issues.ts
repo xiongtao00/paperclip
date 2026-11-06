@@ -14698,6 +14698,14 @@ export function issueRoutes(
     },
     validateIssueMutationBody(updateIssueRouteSchema),
     async (req, res) => {
+      if (req.body.expectedReviewHandoff !== undefined) {
+        assertBoard(req);
+        if (typeof req.body.assigneeAgentId !== "string" ||
+          (req.body.status !== undefined && req.body.status !== "todo") ||
+          Object.keys(req.body).some((key) => key !== "assigneeAgentId" && key !== "expectedReviewHandoff" && key !== "status")) {
+          throw unprocessable("A guarded review handoff can only assign an agent and queue review work");
+        }
+      }
       // Snapshot-guarded writes are policy-only. Do not admit task-control
       // actions that can stop execution before the service takes its row lock.
       if (req.body.expectedExecutionPolicy !== undefined && (
@@ -14716,6 +14724,12 @@ export function issueRoutes(
       if (!existing) return;
       if (!(await assertIssueReadAllowed(req, res, existing))) return;
       const nativeStageApproval = await assertNativeRunKeepsOwnExecutionLock(req, existing, req.body.status, { allowStageApproval: true });
+      const handoffGuard = req.body.expectedReviewHandoff;
+      if (handoffGuard && (existing.status !== "in_review" || existing.projectId !== handoffGuard.projectId ||
+          existing.assigneeAgentId !== handoffGuard.fromAgentId || existing.assigneeUserId ||
+          existing.statusVersion !== handoffGuard.statusVersion || existing.executionRunId || existing.checkoutRunId)) {
+        throw conflict("The review task changed or has active work. Read it again before handing it off.", { code: "issue_review_handoff_changed" });
+      }
       if (req.body.expectedStatusVersion !== undefined && (
         existing.statusVersion !== req.body.expectedStatusVersion || existing.status !== "backlog"
       )) {
@@ -14804,6 +14818,7 @@ export function issueRoutes(
         hiddenAt: hiddenAtRaw,
         expectedExecutionPolicy,
         expectedStatusVersion,
+        expectedReviewHandoff,
         onBehalfOfUserId: _requestedOnBehalfOfUserId,
         ...updateFields
       } = req.body;
@@ -15672,6 +15687,7 @@ export function issueRoutes(
         expectedExecutionPolicy,
         expectedStatusVersion,
         ...(checkedExecutionLock ? { expectedExecutionLock: checkedExecutionLock } : {}),
+        expectedReviewHandoff,
         actorAgentId: actor.agentId ?? null,
         actorRunId: actor.agentId ? actor.runId : null,
         actorRunStopId: actor.agentId && interruptedRunId === actor.runId ? issueMutationStopId : null,
@@ -19636,6 +19652,13 @@ export function issueRoutes(
     "/issues/:id/comments",
     validate(addIssueCommentSchema),
     async (req, res) => {
+      const notifyAgents = req.body.notifyAgents !== false;
+      if (!notifyAgents) {
+        assertBoard(req);
+        if (req.body.resume || req.body.reopen || req.body.interrupt) {
+          throw unprocessable("A non-notifying comment cannot change task execution");
+        }
+      }
       const id = req.params.id as string;
       const issue = await getAccessibleResource(
         req,
@@ -20420,7 +20443,7 @@ export function issueRoutes(
       });
 
       // Merge all wakeups from this comment into one enqueue per agent to avoid duplicate runs.
-      void (async () => {
+      if (notifyAgents) void (async () => {
         type WakeupRequest = NonNullable<
           Parameters<typeof heartbeat.wakeup>[1]
         >;

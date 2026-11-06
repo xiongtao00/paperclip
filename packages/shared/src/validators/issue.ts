@@ -1012,6 +1012,11 @@ export const updateIssueSchema = objectWithoutDefaults(
 )
   .partial()
   .extend({
+    expectedReviewHandoff: z.object({
+      projectId: z.string().uuid(),
+      fromAgentId: z.string().uuid(),
+      statusVersion: z.number().int().nonnegative(),
+    }).strict().optional(),
     expectedStatusVersion: z.number().int().nonnegative().optional(),
     /** Reject a policy write if the policy changed after the caller read it. */
     expectedExecutionPolicy: z.record(z.string(), z.unknown()).optional().nullable(),
@@ -1203,6 +1208,7 @@ export const sendChatMessageSchema = z.object({
 export const markIssueReadSchema = z.object({ throughCommentId: z.uuid().optional() }).strict();
 
 export const addIssueCommentSchema = z.object({
+  notifyAgents: z.boolean().optional(),
   clientRequestId: z.string().uuid().optional(),
   body: multilineTextSchema.pipe(z.string().min(1)),
   attachmentIds: issueCommentAttachmentIdsSchema.optional(),

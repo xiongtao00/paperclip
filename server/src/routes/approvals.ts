@@ -243,11 +243,13 @@ export function approvalRoutes(
           "approval.requester_wakeup_queued",
           "approval.requester_wakeup_skipped",
           "approval.requester_wakeup_failed",
+          "approval.execution_delegated",
         ]),
       ))
       .orderBy(desc(activityLog.createdAt), desc(activityLog.id))
       .limit(1);
     const requesterWakeup = !attempt ? "not_recorded"
+      : attempt.action === "approval.execution_delegated" ? "delegated"
       : attempt.action === "approval.requester_wakeup_failed" ? "failed"
       : attempt.action === "approval.requester_wakeup_queued" && typeof attempt.details?.wakeRunId === "string"
         ? "accepted"
@@ -353,7 +355,23 @@ export function approvalRoutes(
       });
 
       let primaryReviewPathWakeCovered = false;
-      if (approval.requestedByAgentId) {
+      const delegatedExecution = approval.type === "request_board_approval"
+        && approval.payload.kind === "paperclip.managed-host-execution.v1"
+        && typeof approval.payload.recipeHash === "string"
+        && /^[a-f0-9]{64}$/.test(approval.payload.recipeHash)
+        && linkedIssueIds.length === 1
+        && approval.payload.issueId === primaryIssueId;
+      if (delegatedExecution) {
+        await logActivity(db, {
+          companyId: approval.companyId,
+          actorType: "user",
+          actorId: req.actor.userId ?? "board",
+          action: "approval.execution_delegated",
+          entityType: "approval",
+          entityId: approval.id,
+          details: { linkedIssueIds },
+        });
+      } else if (approval.requestedByAgentId) {
         try {
           const wakeRun = await heartbeat.wakeup(approval.requestedByAgentId, {
             source: "automation",
@@ -419,7 +437,7 @@ export function approvalRoutes(
         }
       }
 
-      await queueAdditionalApprovalReviewPathWakes({
+      if (!delegatedExecution) await queueAdditionalApprovalReviewPathWakes({
         approvalId: approval.id,
         approvalStatus: approval.status,
         companyId: approval.companyId,

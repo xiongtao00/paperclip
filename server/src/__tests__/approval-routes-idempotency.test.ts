@@ -163,6 +163,22 @@ describe("approval routes idempotent retries", () => {
     expect(mockHeartbeatService.wakeup).not.toHaveBeenCalled();
   });
 
+  it("does not wake the requester before a registered host executor can consume approval", async () => {
+    const approval = {
+      id: "approval-1", companyId: "company-1", type: "request_board_approval",
+      status: "approved", requestedByAgentId: "agent-1",
+      payload: { kind: "paperclip.managed-host-execution.v1", recipeHash: "a".repeat(64), issueId: "issue-1" },
+    };
+    mockApprovalService.getById.mockResolvedValue(approval);
+    mockApprovalService.approve.mockResolvedValue({ approval, applied: true });
+    const response = await request(await createApp()).post("/api/approvals/approval-1/approve").send({});
+    expect(response.status).toBe(200);
+    expect(mockHeartbeatService.wakeup).not.toHaveBeenCalled();
+    expect(mockLogActivity).toHaveBeenCalledWith(expect.anything(), expect.objectContaining({
+      action: "approval.execution_delegated", entityId: approval.id,
+    }));
+  });
+
   it("does not emit duplicate approval side effects when approve is already resolved", async () => {
     mockApprovalService.getById.mockResolvedValue({
       id: "approval-1",

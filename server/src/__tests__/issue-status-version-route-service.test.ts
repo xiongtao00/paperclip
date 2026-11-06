@@ -3,7 +3,7 @@ import express from "express";
 import request from "supertest";
 import { eq, sql } from "drizzle-orm";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
-import { agents, companies, createDb, issues } from "@paperclipai/db";
+import { agents, companies, createDb, issues, projects } from "@paperclipai/db";
 import { errorHandler } from "../middleware/index.js";
 import { issueRoutes } from "../routes/issues.js";
 import { buildInitialIssueMonitorFields, normalizeIssueExecutionPolicy } from "../services/issue-execution-policy.js";
@@ -45,6 +45,22 @@ const support = await getEmbeddedPostgresTestSupport();
     app.use(errorHandler);
     return { app, issue: issue! };
   }
+
+  it("hands off an idle review once and rejects a stale or combined mutation", async () => {
+    const { app, issue } = await fixture();
+    const [project] = await db.insert(projects).values({ companyId: issue.companyId, name: "Review pilot" }).returning();
+    const [reviewer] = await db.insert(agents).values({ companyId: issue.companyId, name: "Reviewer", role: "qa", adapterType: "process", status: "paused" }).returning();
+    await db.update(issues).set({ status: "in_review", projectId: project!.id, executionPolicy: null }).where(eq(issues.id, issue.id));
+    const ready = await issueService(db).getById(issue.id);
+    const body = { assigneeAgentId: reviewer!.id, status: "todo", expectedReviewHandoff: {
+      projectId: project!.id, fromAgentId: ready!.assigneeAgentId, statusVersion: ready!.statusVersion,
+    } };
+    const mixed = await request(app).patch(`/api/issues/${issue.id}`).send({ ...body, status: "done" });
+    expect(mixed.status).toBe(422);
+    const responses = await Promise.all([1, 2].map(() => request(app).patch(`/api/issues/${issue.id}`).send(body)));
+    expect(responses.map((response) => response.status).sort(), JSON.stringify(responses.map(r => r.body))).toEqual([200, 409]);
+    expect(await issueService(db).getById(issue.id)).toMatchObject({ status: "todo", assigneeAgentId: reviewer!.id });
+  });
 
   it("promotes through the real service and clears a retained monitor without accepting public execution fields", async () => {
     const { app, issue } = await fixture();
