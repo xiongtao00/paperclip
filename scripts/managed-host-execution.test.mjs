@@ -196,3 +196,30 @@ test("a timed-out host process leaves a terminal receipt and is not executed aga
   const recovered = await processApproval({ ...f, run: () => assert.fail("must not repeat"), publish: async () => {} });
   assert.equal(recovered.status, "timed_out");
 });
+
+test("failed execution or missing reviewer gets a company-scoped idempotent recovery owner", async (t) => {
+  const f = await fixture(t);
+  const oldHash = recipeIdentity(f.recipe);
+  f.recipe.recoveryAgentId = randomUUID();
+  assert.notEqual(recipeIdentity(f.recipe), oldHash, "old approval cannot acquire recovery assignment authority");
+  f.approval.payload.recipeHash = recipeIdentity(f.recipe);
+  const recoveryId = randomUUID();
+  const requests = [];
+  const request = async (route, data) => {
+    if (route.endsWith("/attachments") || route.endsWith("/live-runs")) return [];
+    if (route.endsWith("/comments")) return data ?? [];
+    if (route.endsWith("/wakeup")) return { status: "skipped" };
+    if (route === `/companies/${f.recipe.companyId}/issues`) {
+      requests.push(data);
+      assert.equal(data.assigneeAgentId, f.recipe.recoveryAgentId);
+      assert.equal(data.projectId, f.recipe.projectId);
+      assert.equal(data.idempotencyKey, `managed-host-recovery:${f.approval.id}`);
+      return { id: recoveryId, companyId: f.recipe.companyId, projectId: f.recipe.projectId };
+    }
+    return f.issues[0];
+  };
+  const record = await processApproval({ ...f, publish: (r, dir) => publishResult(r, dir, f.recipe, request) });
+  assert.equal(record.recoveryIssueId, recoveryId);
+  await processApproval({ ...f, run: () => assert.fail("must not repeat"), publish: () => assert.fail("already delivered") });
+  assert.equal(requests.length, 1);
+});

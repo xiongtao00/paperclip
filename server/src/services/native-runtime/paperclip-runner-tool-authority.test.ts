@@ -1,3 +1,4 @@
+import * as projectBrowserRuntime from "./project-browser.js";
 import * as connectorRuntime from "../connector-runtime.js";
 import * as cloudIdentity from "../cloud-runtime-identity.js";
 import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
@@ -18,6 +19,7 @@ import {
   heartbeatRuns,
   issueApprovals,
   issueComments,
+  issueRelations,
   issueThreadInteractions,
   issueWatchdogs,
   issues,
@@ -105,6 +107,45 @@ describe("PaperclipRunnerToolAuthority", () => {
 
   afterAll(async () => {
     await temporary?.cleanup();
+  });
+
+  it("turns an environment failure into one CTO-owned recovery task under normal task authority", async () => {
+    const company = randomUUID(), reviewer = randomUUID(), cto = randomUUID(), project = randomUUID(), issue = randomUUID(), run = randomUUID();
+    await db.insert(companies).values({ id: company, name: "Browser recovery", issuePrefix: "BR" + company.slice(0, 5) });
+    await db.insert(agents).values([
+      { id: cto, companyId: company, name: "CTO", role: "cto", status: "active", adapterType: "paperclip_runner", adapterConfig: { provider: "codex" } },
+      { id: reviewer, companyId: company, name: "QA", role: "qa", status: "active", reportsTo: cto, adapterType: "paperclip_runner", adapterConfig: { provider: "codex" } },
+    ]);
+    await db.insert(projects).values({ id: project, companyId: company, name: "Review" });
+    await db.insert(projectWorkspaces).values({ companyId: company, projectId: project, name: "Primary", cwd: "/authorized/project", isPrimary: true });
+    await db.insert(issues).values({ id: issue, companyId: company, projectId: project, title: "Review", status: "in_progress", assigneeAgentId: reviewer });
+    await db.insert(heartbeatRuns).values({ id: run, companyId: company, agentId: reviewer, status: "running", runtimeMode: "native", nativeIssueId: issue, invocationSource: "assignment", triggerDetail: "system", contextSnapshot: { issueId: issue } });
+    await db.update(issues).set({ executionRunId: run }).where(eq(issues.id, issue));
+    const config = vi.spyOn(projectBrowserRuntime, "projectBrowserConfig").mockReturnValue({ companyIds: [company], roots: ["/authorized/project"], executable: "/browser", executableSha256: "a".repeat(64), playwrightModule: "/playwright" });
+    const existingBlocker = randomUUID();
+    await db.insert(issues).values({ id: existingBlocker, companyId: company, projectId: project, title: "Independent blocker", status: "backlog" });
+    const operation = vi.spyOn(projectBrowserRuntime.ProjectBrowser.prototype, "execute").mockRejectedValue(new Error("project_browser_executable_changed"));
+    operation.mockImplementationOnce(async () => {
+      // A separate producer adds a blocker while the browser probe is active.
+      await db.insert(issueRelations).values({ companyId: company, issueId: existingBlocker, relatedIssueId: issue, type: "blocks" });
+      throw new Error("project_browser_executable_changed");
+    });
+    const authority = new PaperclipRunnerToolAuthority(db, { companyId: company, agentId: reviewer, issueId: issue, runId: run, nativeImageTools: true, workspaceRoot: "/authorized/project" });
+    try {
+      for (const callId of ["repair-first", "repair-first", "repair-again"]) {
+        const result = await authority.execute({ tool: "project_browser", callId, arguments: { action: "preflight" } });
+        expect(result).toMatchObject({ outcome: "failed", recoveryTask: { assigneeActorId: cto, projectId: project } });
+      }
+      expect(operation).toHaveBeenCalledTimes(2);
+      const children = await db.select().from(issues).where(and(eq(issues.companyId, company), eq(issues.parentId, issue)));
+      expect(children).toHaveLength(1);
+      expect(children[0]?.assigneeAgentId).toBe(cto);
+      const blockers = await db.select().from(issueRelations).where(and(eq(issueRelations.relatedIssueId, issue), eq(issueRelations.type, "blocks")));
+      expect(new Set(blockers.map(blocker => blocker.issueId))).toEqual(new Set([existingBlocker, children[0]!.id]));
+      await issueService(db).update(children[0]!.id, { status: "done" });
+      const readiness = await issueService(db).getDependencyReadiness(issue);
+      expect(readiness.unresolvedBlockerCount).toBe(1);
+    } finally { authority.close(); operation.mockRestore(); config.mockRestore(); }
   });
 
   it("routes call_api through the private controller instead of the public callback origin", async () => {

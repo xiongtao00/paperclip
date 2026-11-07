@@ -23,7 +23,8 @@ import { skillAccessService } from "../skill-access.js";
 import { SKILL_LIBRARY_SCHEMAS, SKILL_LIBRARY_TOOL_DEFINITIONS, SkillLibraryReadCache, executeSkillLibraryTool } from "./native-skill-library-tools.js";
 import { withExternalExecutionAdmission, type ExternalAdmissionTransaction } from "../../modules/external-agents/index.js";
 import { callTaskWorkspaceTool, pendingTaskRepositoryContinuation } from "../task-workspace-tools.js";
-import { TaskAttachmentReadCache, TASK_ATTACHMENT_DEFINITIONS, TASK_ATTACHMENT_SCHEMAS, listTaskAttachments, readTaskAttachment } from "./runner-task-attachments.js";
+import { ProjectBrowser, projectBrowserConfig, projectBrowserSchema, PROJECT_BROWSER_DEFINITION } from "./project-browser.js";
+import { saveProjectBrowserImage, readTaskImage, TASK_IMAGE_DEFINITION, TASK_IMAGE_SCHEMA, TaskAttachmentReadCache, TASK_ATTACHMENT_DEFINITIONS, TASK_ATTACHMENT_SCHEMAS, listTaskAttachments, readTaskAttachment } from "./runner-task-attachments.js";
 import { RUNNER_BRIDGE_READ_OPERATIONS, RUNNER_BRIDGE_SCHEMAS, runnerBridgeDefinitions, readAssignedSkill, executeWorkspaceTool, readWorkspaceUploadFile, settleRunnerBridgeRead, assertRunnerWorkspacePathAllowed } from "./runner-bridge-tools.js";
 import type { NativeRuntimeContextSnapshot } from "../../vendor/paperclip-runner/index.js";
 import { assertCanManageIssueMonitor, eligibleIssueMonitorWait, prepareIssueMonitorUpdate, setTaskMonitorSchema, summarizeIssueMonitor } from "../issue-monitors.js";
@@ -86,6 +87,7 @@ import {
   assets,
   runnerApiResponseReservations,
   agents,
+  projectWorkspaces,
   agentWakeupRequests,
   chatEndpoints,
   chatConversations,
@@ -94,6 +96,7 @@ import {
   heartbeatRuns,
   issueApprovals,
   issueComments,
+  issueRelations,
   issueAttachments,
   issueDocuments,
   issues,
@@ -171,6 +174,7 @@ const RECOVERABLE_READ_OPERATIONS = new Set([
   ...RUNNER_BRIDGE_READ_OPERATIONS,
   ...SKILL_LIBRARY_SCHEMAS.keys(),
   ...Object.keys(TASK_ATTACHMENT_SCHEMAS),
+  "read_task_image",
   READ_CURRENT_WAKE_COMMENTS_TOOL_NAME, LIST_CHAT_ATTACHMENTS_TOOL_NAME, READ_CHAT_ATTACHMENT_TOOL_NAME,
   READ_TOOL_RESULT, "connections_search",
 ]);
@@ -222,6 +226,8 @@ type Binding = {
   firstPartyOnly?: boolean;
   /** Operator-approved Dot attachment access, pinned when the turn opens. */
   taskAttachmentRead?: boolean;
+  /** Native image delivery is currently qualified for Codex dynamic tools. */
+  nativeImageTools?: boolean;
   runtimeContext?: NativeRuntimeContextSnapshot;
   assertBridgeAuthority?: (database?: Db) => Promise<void>;
   executionTargetKind?: "local" | "remote";
@@ -331,7 +337,8 @@ function hireAgentResult(value: unknown, provider: unknown) {
 export class PaperclipRunnerToolAuthority {
   #taskAttachmentCache = new TaskAttachmentReadCache();
   #skillLibraryCache = new SkillLibraryReadCache();
-  close() { this.#taskAttachmentCache.close(); this.#skillLibraryCache.close(); }
+  #projectBrowser?: ProjectBrowser;
+  close() { this.#taskAttachmentCache.close(); this.#skillLibraryCache.close(); void this.#projectBrowser?.close(); }
   constructor(readonly db: Db, readonly binding: Binding) {}
 
   definitions(): Array<Record<string, unknown>> {
@@ -418,6 +425,12 @@ export class PaperclipRunnerToolAuthority {
     definitions.push(READ_CHAT_ATTACHMENT_TOOL_DEFINITION);
     if (this.binding.taskAttachmentRead) definitions.push(...TASK_ATTACHMENT_DEFINITIONS);
     definitions.push(...SKILL_LIBRARY_TOOL_DEFINITIONS);
+    if (this.binding.nativeImageTools) {
+      definitions.push(TASK_IMAGE_DEFINITION);
+      const config = projectBrowserConfig();
+      if (workMode === "standard" && this.binding.executionTargetKind !== "remote" && this.binding.workspaceRoot
+        && config?.companyIds.includes(this.binding.companyId)) definitions.push(PROJECT_BROWSER_DEFINITION);
+    }
     definitions.push(...runnerBridgeDefinitions({ workspace: !this.binding.firstPartyOnly && !!this.binding.workspaceRoot && this.binding.workspaceBridge === true, skills: !!this.binding.runtimeContext, api: runnerApiToolsEnabled(this.binding.companyId, this.binding.apiToolsEnabled), mode: workMode }));
     const connectionTools = this.binding.firstPartyOnly ? [] : [...RUNTIME_CONNECTION_TOOL_DEFINITIONS,
       ...(this.binding.connectorAssignments ?? []).flatMap((assignment) => assignment.tools)];
@@ -520,7 +533,7 @@ export class PaperclipRunnerToolAuthority {
       if (result === undefined) return null;
       return { result: call.tool === "hire_agent" ? hireAgentResult(result, context.actor.adapterConfig?.provider) : apiToolResult(result) };
     }
-    if (call.tool === "workspace_write" || call.tool === "workspace_run") {
+    if (call.tool === "workspace_write" || call.tool === "workspace_run" || call.tool === "project_browser") {
       const bridge = record(record(run.resultJson?.bridgeToolReceipts)[callKey]);
       if (bridge.state === "completed" && bridge.tool === call.tool
         && bridge.digest === toolInputDigest({ tool: call.tool, arguments: call.arguments })
@@ -615,12 +628,78 @@ export class PaperclipRunnerToolAuthority {
     }
     await this.#assertToolScope(call.tool);
     if (this.binding.nativeReview && call.tool === "resolve_review") return this.#resolveReview(call.arguments);
+    if (call.tool === "project_browser") {
+      const authorize = async () => {
+        const current = await this.#boundContext({ tool: call.tool });
+        await this.binding.assertBridgeAuthority?.();
+        if (!this.binding.nativeImageTools || current.actor.adapterConfig?.provider !== "codex"
+          || current.issue.workMode !== "standard" || !this.definitions().some(tool => tool.name === call.tool)) throw forbidden("Project browser is unavailable to this run");
+      };
+      await authorize();
+      const current = await this.#boundContext({ tool: call.tool });
+      const [workspace] = current.issue.projectId ? await this.db.select({ cwd: projectWorkspaces.cwd }).from(projectWorkspaces)
+        .where(and(eq(projectWorkspaces.companyId, this.binding.companyId), eq(projectWorkspaces.projectId, current.issue.projectId), eq(projectWorkspaces.isPrimary, true))).limit(1) : [];
+      if (!workspace?.cwd) throw badRequest("project_browser_project_workspace_required");
+      const input = projectBrowserSchema.parse(call.arguments);
+      this.#projectBrowser ??= new ProjectBrowser(projectBrowserConfig()!);
+      return this.#bridgeMutation(call, async () => {
+        let result;
+        try { result = await this.#projectBrowser!.execute(workspace.cwd!, input, authorize); }
+        catch (error) {
+          await authorize();
+          const message = error instanceof Error ? error.message.split("\n")[0]!.slice(0, 1000) : "Browser operation failed";
+          if (!["open", "preflight"].includes(input.action) || /required|invalid_snapshot|already_pinned/.test(message)) throw error;
+          const managers = await this.db.select({ id: agents.id }).from(agents).where(and(
+            eq(agents.companyId, this.binding.companyId), eq(agents.role, "cto"), notInArray(agents.status, ["terminated"]),
+          )).limit(2);
+          if (managers.length !== 1 || managers[0]!.id === this.binding.agentId) throw error;
+          const key = createHash("sha256").update(JSON.stringify([input.commit, input.publishDir, message])).digest("hex");
+          const recovery = record(await this.#createTask({
+            title: "Restore project browser review capability", assigneeActorId: managers[0]!.id,
+            idempotencyKey: `project-browser-recovery:${key}`,
+            description: `Restore browser capability for original task ${this.binding.issueId}. First error: ${message}. Fixed snapshot: ${input.commit ?? "preflight"}, publish directory: ${input.publishDir || "."}. Diagnose this specific gap, preserve existing evidence and approval boundaries, then return verified capability and resume the original reviewer. Do not replay the product matrix.`,
+          }, null));
+          const recoveryTask = record(recovery.task);
+          if (typeof recoveryTask.id !== "string") throw new Error("Browser recovery task was not confirmed");
+          await this.#withMutationReceipt("project_browser_dependency", key, { recoveryTaskId: recoveryTask.id }, async (tx) => {
+            // The mutation helper holds the current issue lock. Append to its
+            // fresh blocker set so concurrent dependency edits are preserved.
+            const blockers = await tx.select({ id: issueRelations.issueId }).from(issueRelations).where(and(
+              eq(issueRelations.companyId, this.binding.companyId), eq(issueRelations.relatedIssueId, this.binding.issueId), eq(issueRelations.type, "blocks"),
+            ));
+            await issueService(tx).update(this.binding.issueId, {
+              blockedByIssueIds: [...new Set([...blockers.map(blocker => blocker.id), recoveryTask.id as string])],
+              actorAgentId: this.binding.agentId, actorRunId: this.binding.runId,
+            }, tx);
+            return { dependencyTaskId: recoveryTask.id };
+          });
+          return { outcome: "failed", message, recoveryTask,
+            guidance: "CTO recovery task is assigned and linked as a blocker without removing existing dependencies. Yield until repair evidence arrives; the normal dependency lifecycle resumes review. Do not create a duplicate repair request or ask the board to run commands." };
+        }
+        if (!("schema" in result) || result.schema !== "paperclip.tool-image.v1") return result;
+        try { return await saveProjectBrowserImage({ db: this.db, binding: this.binding, storage: this.binding.storage, image: result, authorize }); }
+        catch {
+          await authorize();
+          return { ...result, metadata: { ...result.metadata, attachmentDelivery: "failed", guidance: "Page action already completed. Use observe to capture and attach its current state; do not repeat the action." } };
+        }
+      });
+    }
+    if (call.tool === "read_task_image") {
+      const authorize = async () => {
+        const current = await this.#boundContext({ tool: call.tool });
+        await this.binding.assertBridgeAuthority?.();
+        if (!this.binding.nativeImageTools || current.actor.adapterConfig?.provider !== "codex") throw forbidden("Native image delivery is unavailable");
+      };
+      await authorize();
+      return settleRunnerBridgeRead(() => readTaskImage({ db: this.db, binding: this.binding, arguments: TASK_IMAGE_SCHEMA.parse(call.arguments), storage: this.binding.storage, cache: this.#taskAttachmentCache, authorize }));
+    }
     if (Object.hasOwn(TASK_ATTACHMENT_SCHEMAS, call.tool)) {
       const authorize = async () => {
         const current = await this.#boundContext({ tool: call.tool });
-        if (!this.binding.taskAttachmentRead || current.actor.adapterType !== "paperclip_runner"
-          || current.actor.adapterConfig?.provider !== "openai_dot" || current.actor.adapterConfig?.dotAttachmentAccess !== true)
-          throw forbidden("Dot task attachment reading was not enabled or was disabled");
+        const codex = this.binding.nativeImageTools && current.actor.adapterConfig?.provider === "codex";
+        const dot = current.actor.adapterConfig?.provider === "openai_dot" && current.actor.adapterConfig?.dotAttachmentAccess === true;
+        if (!this.binding.taskAttachmentRead || current.actor.adapterType !== "paperclip_runner" || (!codex && !dot))
+          throw forbidden("Task attachment reading was not enabled or was disabled");
         await this.binding.assertBridgeAuthority?.();
       };
       await authorize();

@@ -92,6 +92,10 @@ CEO 每次试点记录计划外审批数、审批到实际启动的耗时、无�
 
 整改映射：A01/A02/A05 → 预检与生产一致诊断（E02）；A03/A06/A07 → 运行身份、证据与审批接续（E01/E03/E04/E05/E06）；A04/A08/A11 → 冒烟、停止空转与成本台账（E07/E08）；A09/A10/A12 → 差量矩阵、权威启动说明、体验和实机验收。
 
+## 2026-11-07 执行能力补齐
+
+四次真实项目阻塞的通用修复在 `workflow-improve-261107`：新增宿主项目浏览器原生工具、Codex 原始图片读取与视觉输出、随机端口静态快照、截图自动归档、可登记 CTO 的幂等修复分派，以及已应用八岗位的流程 v2。独立员工验收另记，详见 [实施记录](plans/2026-11-07-autonomous-project-delivery.md) 与 [运行说明](project-browser-agent-workflow.zh-CN.md)。
+
 ## 文件与生效范围
 
 - [公司流程 v1](../../companies/xhzy/product-build-process.md)和[岗位规则](../../companies/xhzy/role-workflow-v1.json)是 XHZY 的运行基线；本方案是 Paperclip 侧的实施与试点记录。

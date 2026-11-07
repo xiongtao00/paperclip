@@ -19,6 +19,7 @@ Agent access: [companion](../agent-access-map/execution-environments.md).
 - `probe`: `execution-environments/probe` — test reachability and runtime prerequisites in the actual target.
 - `assignment`: `execution-environments/assignment` — bind the intended agent/project/workspace to its execution target.
 - `images`: `execution-environments/images` — inspect supported sandbox custom-image preparation and terminal workflows.
+- `project-browser`: `execution-environments/project-browser` — let a local Codex employee inspect and operate an authorized committed static product in a host browser.
 
 ## How to get to it (user POV)
 
@@ -33,6 +34,14 @@ or instance administrator.
 ### `remote-execution`
 
 Choose the environment in agent/project/workspace configuration, then inspect the resulting task/run and workspace.
+
+### `agent-browser-review`
+
+Assign a browser review task to a local Codex employee in an operator-enabled
+company, with a primary local project workspace under its authorized directory.
+The employee calls `project_browser` for preflight and fixed-commit review.
+Images and interactive state return to that run; original screenshots appear in
+the task's existing attachments surface.
 
 ## Driving it with Playwright and the Paperclip CLI
 
@@ -173,3 +182,15 @@ Managed account transfer requires `projectAuthCheckVersion: 1` and a successful
 `check_project_auth` result for the exact prepared configuration, provider, and
 project set. New preparation removes old validation. Core checks the saved
 validation again in the dispatch update.
+
+### `agent-browser-review`
+
+Use a nonsensitive committed static fixture. Have the actual employee open its
+full commit SHA, render the returned image in Code Mode, click an observed
+control, fill an input and read an attached original through `read_task_image`.
+Confirm the employee's independent observation and the task attachment hash.
+The [operator and employee workflow](../../doc/project-browser-agent-workflow.zh-CN.md)
+describes installation and scope. Verify that another company, an unauthorized
+root and a revoked run cannot use the browser. Close the run and confirm its
+browser and ephemeral server are released. Physical devices and backend apps
+require their own project qualification.

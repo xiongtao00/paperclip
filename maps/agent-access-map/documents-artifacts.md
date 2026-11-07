@@ -128,6 +128,13 @@ company and task visibility before opening storage.
 Gaps: Native API uploads are bounded; attachment reading has target/provider and
 permission conditions.
 
+Local Codex task runs additionally expose `list_task_attachments`,
+`read_task_attachment`, and `read_task_image`. The image read verifies the
+current task's original PNG and SHA-256, with a 300 KB bound and fresh run
+permission checks. Code Mode callers parse the returned JSON and render
+`image_url`. This qualifies the local PNG path only; other attachment/provider
+operations retain the baseline scope above.
+
 ## `work-products`
 
 Capability ID: `documents-artifacts/work-products`.

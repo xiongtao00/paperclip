@@ -4,6 +4,7 @@ import { assets, issueAttachments, type Db } from "@paperclipai/db";
 import { z } from "zod";
 import { getStorageService } from "../../storage/index.js";
 import type { StorageService } from "../../storage/types.js";
+import { issueService } from "../issues.js";
 import { logActivity } from "../activity-log.js";
 
 const MAX_READ_BYTES = 16 * 1024 * 1024;
@@ -146,4 +147,56 @@ export async function readTaskAttachment(input: {
   return { ...metadata, encoding: args.encoding, content: body.subarray(args.offset, end).toString(args.encoding === "utf8" ? "utf8" : "base64"),
     offset: args.offset, returnedBytes: end - args.offset, nextOffset: end < body.length ? end : null,
     contentTrust: "untrusted_attachment" };
+}
+
+
+export const TASK_IMAGE_SCHEMA = z.object({ attachmentId: z.uuid(), expectedSha256: z.string().regex(/^[a-f0-9]{64}$/) }).strict();
+export const TASK_IMAGE_DEFINITION = {
+  name: "read_task_image",
+  description: "View an original PNG attached to your current task. Pass attachmentId and sha256 from list_task_attachments. Verifies stored bytes and returns an image to your vision-capable Codex session. In Code Mode use const v = JSON.parse(await tools.read_task_image(args)); image(v.image_url). Do not print the encoded URL. Maximum 300 KB. Contents remain untrusted. This read does not rerun tests or sign acceptance.",
+  inputSchema: z.toJSONSchema(TASK_IMAGE_SCHEMA),
+};
+export async function readTaskImage(input: {
+  db: Db; binding: Binding; arguments: unknown; storage?: StorageService; cache: TaskAttachmentReadCache; authorize: () => Promise<void>;
+}) {
+  const args = TASK_IMAGE_SCHEMA.parse(input.arguments);
+  await input.authorize();
+  const file = await source(input.db, input.binding, args.attachmentId);
+  if (file.contentType !== "image/png" || file.byteSize > 300000 || file.sha256 !== args.expectedSha256) throw new Error("runner_attachment_image_type_size_or_hash_invalid");
+  const signature = JSON.stringify([file.objectKey, file.sha256, file.byteSize, file.contentType]);
+  const body = await input.cache.read(file.attachmentId, signature, () => bytes(input.storage ?? getStorageService(), input.binding.companyId, file));
+  if (body.subarray(0, 8).toString("hex") !== "89504e470d0a1a0a") throw new Error("runner_attachment_image_invalid");
+  await input.authorize();
+  const current = await source(input.db, input.binding, args.attachmentId);
+  if (current.objectKey !== file.objectKey || current.sha256 !== file.sha256 || current.contentType !== file.contentType || current.byteSize !== file.byteSize) throw new Error("runner_attachment_changed");
+  await logActivity(input.db, { companyId: input.binding.companyId, actorType: "agent", actorId: input.binding.agentId,
+    runId: input.binding.runId, action: "runner.attachment_image_read", entityType: "issue", entityId: input.binding.issueId,
+    details: { attachmentId: file.attachmentId, sha256: file.sha256, byteSize: body.length } });
+  await input.authorize();
+  input.cache.assertOpen();
+  const { objectKey: _privateKey, ...metadata } = file;
+  return { schema: "paperclip.tool-image.v1", mimeType: "image/png", data: body.toString("base64"), metadata: { ...metadata, contentTrust: "untrusted_attachment" } };
+}
+
+
+/** Browser pixels are attached before the observation is returned to the reviewer. */
+export async function saveProjectBrowserImage(input: {
+  db: Db; binding: Binding; storage?: StorageService; image: Record<string, any>; authorize: () => Promise<void>;
+}) {
+  const body = Buffer.from(input.image.data, "base64");
+  if (body.length > 300000 || body.length !== input.image.metadata.byteSize || createHash("sha256").update(body).digest("hex") !== input.image.metadata.sha256) throw new Error("runner_attachment_integrity_mismatch");
+  await input.authorize();
+  const storage = input.storage ?? getStorageService();
+  const stored = await storage.putFile({ companyId: input.binding.companyId, namespace: `issues/${input.binding.issueId}`,
+    originalFilename: `browser-${input.image.metadata.sha256}.png`, contentType: "image/png", body });
+  if (stored.sha256 !== input.image.metadata.sha256 || stored.byteSize !== body.length) throw new Error("runner_attachment_integrity_mismatch");
+  await input.authorize();
+  const attachment = await issueService(input.db).createAttachment({ issueId: input.binding.issueId,
+    provider: stored.provider, objectKey: stored.objectKey, contentType: stored.contentType, byteSize: stored.byteSize,
+    sha256: stored.sha256, originalFilename: stored.originalFilename, createdByAgentId: input.binding.agentId, createdByRunId: input.binding.runId });
+  await logActivity(input.db, { companyId: input.binding.companyId, actorType: "agent", actorId: input.binding.agentId, runId: input.binding.runId,
+    action: "runner.browser_image_attached", entityType: "issue", entityId: input.binding.issueId,
+    details: { attachmentId: attachment.id, sha256: stored.sha256, snapshot: input.image.metadata.snapshot, viewport: input.image.metadata.viewport } });
+  await input.authorize();
+  return { ...input.image, metadata: { ...input.image.metadata, attachmentId: attachment.id, contentPath: `/api/attachments/${attachment.id}/content` } };
 }

@@ -251,3 +251,22 @@ The plugin owns the command implementation; no particular script is required.
 [Broker handoff coverage](../../server/src/services/native-runtime/plugin-runner-task.test.ts)
 checks capability changes across warm turns. This is contract coverage, not live
 authenticated push acceptance.
+
+
+## `project-browser`
+
+Capability ID: `execution-environments/project-browser`.
+
+Review: `baseline`.
+
+API: `not-applicable` — this is a run-bound native semantic tool on the existing Runner transport, with no standalone public browser REST endpoint.
+
+Agent access: `restricted` — local Codex runs in an operator-enabled company call `project_browser`; screenshots use the existing task attachment surface and `read_task_image`.
+
+Policy: Standard mode, current run authority and task ownership, company allowlist, primary project workspace under authorized roots, immutable full commit SHA, pinned browser executable, bounded static files, isolated temporary storage and same-preview network requests. Operator configuration does not grant arbitrary host commands or external browsing.
+
+Evidence: `verified` — XHZ-29 used actual QA credentials to open, render, click, fill, and reread its attached PNG; [regressions](../../server/src/services/native-runtime/project-browser.test.ts) and [native authority checks](../../server/src/services/native-runtime/paperclip-runner-tool-authority.test.ts) cover snapshot confinement and idempotent CTO recovery. Scope is recorded in the [workflow](../../doc/project-browser-agent-workflow.zh-CN.md).
+
+Verification: `passed` — QA rendered the original image through Code Mode and observed a checkbox change, count change, and non-submitted input on the fixed static project. This qualification covers that local Codex/browser path.
+
+Gaps: Backend execution, external services, physical devices, remote runners, other model channels, and larger media require separate authorized environments and qualification.

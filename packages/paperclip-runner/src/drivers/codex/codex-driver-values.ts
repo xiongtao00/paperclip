@@ -1,3 +1,4 @@
+import { createHash } from "node:crypto";
 import { resolveClaudeEffort } from "../acpx/claude-effort.js";
 import { resolvePiThinkingLevel } from "../acpx/pi-thinking.js";
 import { isProviderMode } from "../../contracts/provider-mode.js";
@@ -280,6 +281,26 @@ export function codexSemanticToolSpecs(): readonly Readonly<
 }
 
 export function dynamicToolResponse(value: unknown): Record<string, unknown> {
+  const image = record(value);
+  if (image.schema === "paperclip.tool-image.v1") {
+    const metadata = record(image.metadata);
+    const bytes = typeof image.data === "string" && image.data.length <= 400000
+      ? Buffer.from(image.data, "base64") : Buffer.alloc(0);
+    if (image.mimeType !== "image/png" || bytes.length < 24 || bytes.length > 300000
+      || bytes.subarray(0, 8).toString("hex") !== "89504e470d0a1a0a"
+      || bytes.toString("base64") !== image.data || metadata.byteSize !== bytes.length
+      || metadata.sha256 !== createHash("sha256").update(bytes).digest("hex")) {
+      throw new Error("Invalid verified tool image");
+    }
+    const imageUrl = `data:image/png;base64,${image.data}`;
+    // Some installed Codex Code Mode versions keep only text from dynamic
+    // outputs. Preserve a renderable URL in that value as well as the native
+    // image item. Code Mode must parse the JSON and call image(image_url).
+    return { success: true, contentItems: [
+      { type: "inputText", text: JSON.stringify({ ...metadata, image_url: imageUrl }) },
+      { type: "inputImage", imageUrl },
+    ] };
+  }
   return {
     success: true,
     contentItems: [

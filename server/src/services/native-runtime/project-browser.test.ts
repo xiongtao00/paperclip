@@ -1,0 +1,26 @@
+import { mkdtemp, writeFile, rm, symlink } from "node:fs/promises";
+import { execFileSync } from "node:child_process";
+import os from "node:os";
+import path from "node:path";
+import { afterEach, expect, it } from "vitest";
+import { projectBrowserSnapshot } from "./project-browser.js";
+const roots: string[] = [];
+afterEach(async () => { await Promise.all(roots.splice(0).map(root => rm(root, { recursive: true, force: true }))); });
+it("serves only bounded committed static bytes, excludes secrets and symlinks, and rejects root escapes", async () => {
+  const root = await mkdtemp(path.join(os.tmpdir(), "project-browser-test-")); roots.push(root);
+  const git = (...args: string[]) => execFileSync("/usr/bin/git", ["-C", root, ...args], { encoding: "utf8" }).trim();
+  git("init", "--quiet");
+  await writeFile(path.join(root, "index.html"), "<button>Original</button>");
+  await writeFile(path.join(root, ".secret.json"), "secret");
+  await symlink("/etc/passwd", path.join(root, "secret.js"));
+  git("add", "."); git("-c", "user.email=test@example.invalid", "-c", "user.name=Test", "-c", "core.hooksPath=/dev/null", "commit", "--quiet", "-m", "fixture");
+  const commit = git("rev-parse", "HEAD");
+  await writeFile(path.join(root, "index.html"), "<button>Uncommitted</button>");
+  const files = await projectBrowserSnapshot(root, commit, "", [root]);
+  expect((await projectBrowserSnapshot(root, commit, ".", [root])).get("/index.html")?.body.toString()).toBe("<button>Original</button>");
+  expect([...files.keys()]).toEqual(["/index.html"]);
+  expect(files.get("/index.html")?.body.toString()).toBe("<button>Original</button>");
+  await expect(projectBrowserSnapshot(root, commit, "../", [root])).rejects.toThrow("invalid_snapshot");
+  await expect(projectBrowserSnapshot(root, commit, "", ["/"])).rejects.toThrow("outside_authorized_roots");
+  await expect(projectBrowserSnapshot(root, "HEAD", "", [root])).rejects.toThrow("invalid_snapshot");
+});

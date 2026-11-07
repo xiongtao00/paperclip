@@ -22,6 +22,7 @@ export function recipeIdentity(recipe) {
     recipe.cwd, recipe.executable, recipe.executableSha256, recipe.args, recipe.timeoutMs,
     recipe.preflightArgs ?? null, recipe.artifacts ?? [],
     ...(recipe.autoAssignReviewer === true ? ["auto-assign-reviewer"] : []),
+    ...(recipe.recoveryAgentId ? ["recovery-agent", recipe.recoveryAgentId] : []),
   ]));
 }
 
@@ -253,6 +254,17 @@ export async function publishResult(record, dir, recipe, request = api) {
       await request(`/issues/${record.issueId}/comments`, { body: message, notifyAgents: false });
     }
   }
+  if (recipe.recoveryAgentId && (record.status !== "succeeded" || record.missingArtifacts?.length
+    || !["accepted", "already_scheduled"].includes(record.reviewerWakeup))) {
+    const recovery = await request(`/companies/${recipe.companyId}/issues`, {
+      projectId: recipe.projectId, assigneeAgentId: recipe.recoveryAgentId, status: "todo",
+      title: "Restore managed execution or review delivery",
+      description: `Restore the specific gap for /issues/${record.issueId}. Execution ${record.executionId} is ${record.status}; missing artifacts: ${(record.missingArtifacts ?? []).join(", ") || "none"}; review handoff: ${record.reviewerWakeup}. Inspect existing receipts and originals first. Do not replay the approved command or clear unrelated holds. Return evidence to the original task and resume its original reviewer under normal task permissions. Escalate only a concrete authority gap with an actionable approval link.`,
+      idempotencyKey: `managed-host-recovery:${record.executionId}`,
+    });
+    if (!uuid.test(recovery.id) || recovery.companyId !== recipe.companyId || recovery.projectId !== recipe.projectId) throw new Error("Recovery assignment not confirmed");
+    record.recoveryIssueId = recovery.id;
+  }
   record.deliveredAt = new Date().toISOString();
   await save(dir, record);
 }
@@ -270,6 +282,7 @@ async function main() {
     || (recipe.preflightArgs != null && (!Array.isArray(recipe.preflightArgs) || !recipe.preflightArgs.every((arg) => typeof arg === "string")))
     || (recipe.artifacts != null && (!Array.isArray(recipe.artifacts) || recipe.artifacts.length > 10
       || new Set(recipe.artifacts).size !== recipe.artifacts.length || !recipe.artifacts.every(validArtifact)))
+    || (recipe.recoveryAgentId != null && !uuid.test(recipe.recoveryAgentId))
     || (recipe.autoAssignReviewer != null && typeof recipe.autoAssignReviewer !== "boolean")
     || !Number.isInteger(recipe.timeoutMs) || recipe.timeoutMs < 100 || recipe.timeoutMs > 1_200_000) {
     throw new Error("Invalid operator recipe");

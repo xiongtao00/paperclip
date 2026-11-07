@@ -6,7 +6,7 @@ import { eq } from "drizzle-orm";
 import { activityLog, agents, assets, companies, createDb, heartbeatRuns, issueAttachments, issues, runnerApiResponseReservations } from "@paperclipai/db";
 import { startEmbeddedPostgresTestDatabase } from "../../__tests__/helpers/embedded-postgres.js";
 import type { StorageService } from "../../storage/types.js";
-import { TaskAttachmentReadCache } from "./runner-task-attachments.js";
+import { saveProjectBrowserImage, TaskAttachmentReadCache } from "./runner-task-attachments.js";
 import { runnerApiCatalog } from "./runner-api-catalog.js";
 import { PaperclipRunnerToolAuthority } from "./paperclip-runner-tool-authority.js";
 
@@ -47,6 +47,34 @@ describe("Dot assigned-task attachment reading", () => {
     expect(off.authority.definitions().map(t => t.name)).not.toContain("read_task_attachment");
     await expect(off.call("read_task_attachment", { attachmentId: off.attachment.id })).rejects.toThrow("not enabled");
     expect(off.getObject).not.toHaveBeenCalled();
+  });
+  it("attaches a browser original with its hash to the current task", async () => {
+    const png = Buffer.from("iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+aP1sAAAAASUVORK5CYII=", "base64");
+    const f = await fixture(png);
+    const putFile = vi.fn().mockResolvedValue({ provider: "local_disk", objectKey: `${f.companyId}/browser-proof`, contentType: "image/png", byteSize: png.length, sha256: sha(png), originalFilename: "browser-proof.png" });
+    const result = await saveProjectBrowserImage({ db, binding: f, storage: { ...f.storage, putFile } as StorageService,
+      image: { schema: "paperclip.tool-image.v1", data: png.toString("base64"), metadata: { byteSize: png.length, sha256: sha(png), snapshot: ["project", "a".repeat(40), ""], viewport: { width: 390, height: 844 } } }, authorize: async () => {} });
+    expect(result.metadata.attachmentId).toBeTruthy();
+    expect(result.metadata.contentPath).toContain(result.metadata.attachmentId);
+    const [stored] = await db.select().from(issueAttachments).where(eq(issueAttachments.id, result.metadata.attachmentId));
+    expect(stored?.issueId).toBe(f.issueId);
+    expect(putFile).toHaveBeenCalledWith(expect.objectContaining({ companyId: f.companyId, body: png }));
+  });
+  it("delivers an original PNG to Codex while retaining task scope and current authority", async () => {
+    const png = Buffer.from("iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+aP1sAAAAASUVORK5CYII=", "base64");
+    const f = await fixture(png);
+    await db.update(agents).set({ adapterConfig: { provider: "codex" } }).where(eq(agents.id, f.agentId));
+    await db.update(assets).set({ contentType: "image/png" }).where(eq(assets.id, f.asset.id));
+    const authority = new PaperclipRunnerToolAuthority(db, { ...f, dotRuntime: false, nativeImageTools: true });
+    const call = (args: unknown) => authority.execute({ tool: "read_task_image", callId: randomUUID(), arguments: args });
+    expect(authority.definitions().map(tool => tool.name)).toContain("read_task_image");
+    expect(await call({ attachmentId: f.attachment.id, expectedSha256: sha(png) })).toMatchObject({ schema: "paperclip.tool-image.v1", data: png.toString("base64"), metadata: { sha256: sha(png), byteSize: png.length } });
+    const foreign = await fixture(png);
+    expect(await call({ attachmentId: foreign.attachment.id, expectedSha256: sha(png) })).toMatchObject({ outcome: "failed" });
+    expect(await call({ attachmentId: f.attachment.id, expectedSha256: "0".repeat(64) })).toMatchObject({ outcome: "failed" });
+    await db.update(agents).set({ adapterConfig: { provider: "openai_dot" } }).where(eq(agents.id, f.agentId));
+    await expect(call({ attachmentId: f.attachment.id, expectedSha256: sha(png) })).rejects.toThrow("unavailable");
+    authority.close();
   });
   it("reads verified file contents without paths or storage keys and audits metadata only", async () => {
     const f = await fixture();
