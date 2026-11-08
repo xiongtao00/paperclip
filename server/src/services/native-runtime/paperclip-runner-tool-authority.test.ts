@@ -109,6 +109,19 @@ describe("PaperclipRunnerToolAuthority", () => {
     await temporary?.cleanup();
   });
 
+  it("preflights and releases the assigned environment before a product project exists", async () => {
+    const config = vi.spyOn(projectBrowserRuntime, "projectBrowserConfig").mockReturnValue({ companyIds: [companyId], roots: ["/authorized/unbound"], executable: "/browser", executableSha256: "a".repeat(64), playwrightModule: "/playwright" });
+    const operation = vi.spyOn(projectBrowserRuntime.ProjectBrowser.prototype, "execute").mockResolvedValue({ ready: true, browser: "chromium", screenshotBytes: 42, loopback: "verified on open", productVerified: false });
+    const authority = new PaperclipRunnerToolAuthority(db, { companyId, agentId, issueId, runId, nativeImageTools: true, workspaceRoot: "/authorized/unbound" });
+    try {
+      expect(await authority.execute({ tool: "project_browser", callId: "kickoff-before-project", arguments: { action: "preflight" } })).toMatchObject({ ready: true, productVerified: false });
+      await authority.execute({ tool: "project_browser", callId: "release-before-project", arguments: { action: "close" } });
+      expect(operation.mock.calls.map(call => call[0])).toEqual(["/authorized/unbound", "/authorized/unbound"]);
+      await expect(authority.execute({ tool: "project_browser", callId: "product-requires-project", arguments: { action: "open", commit: "a".repeat(40) } })).rejects.toThrow("project_workspace_required");
+      expect(operation).toHaveBeenCalledTimes(2);
+    } finally { authority.close(); operation.mockRestore(); config.mockRestore(); }
+  });
+
   it("turns an environment failure into one CTO-owned recovery task under normal task authority", async () => {
     const company = randomUUID(), reviewer = randomUUID(), cto = randomUUID(), project = randomUUID(), issue = randomUUID(), run = randomUUID();
     await db.insert(companies).values({ id: company, name: "Browser recovery", issuePrefix: "BR" + company.slice(0, 5) });

@@ -636,15 +636,18 @@ export class PaperclipRunnerToolAuthority {
           || current.issue.workMode !== "standard" || !this.definitions().some(tool => tool.name === call.tool)) throw forbidden("Project browser is unavailable to this run");
       };
       await authorize();
+      const input = projectBrowserSchema.parse(call.arguments);
       const current = await this.#boundContext({ tool: call.tool });
       const [workspace] = current.issue.projectId ? await this.db.select({ cwd: projectWorkspaces.cwd }).from(projectWorkspaces)
         .where(and(eq(projectWorkspaces.companyId, this.binding.companyId), eq(projectWorkspaces.projectId, current.issue.projectId), eq(projectWorkspaces.isPrimary, true))).limit(1) : [];
-      if (!workspace?.cwd) throw badRequest("project_browser_project_workspace_required");
-      const input = projectBrowserSchema.parse(call.arguments);
+      // Kickoff can qualify its assigned environment before a repository is
+      // chosen. Product actions still require the primary project workspace.
+      const browserRoot = workspace?.cwd ?? (["preflight", "close"].includes(input.action) ? this.binding.workspaceRoot : undefined);
+      if (!browserRoot) throw badRequest("project_browser_project_workspace_required");
       this.#projectBrowser ??= new ProjectBrowser(projectBrowserConfig()!);
       return this.#bridgeMutation(call, async () => {
         let result;
-        try { result = await this.#projectBrowser!.execute(workspace.cwd!, input, authorize); }
+        try { result = await this.#projectBrowser!.execute(browserRoot, input, authorize); }
         catch (error) {
           await authorize();
           const message = error instanceof Error ? error.message.split("\n")[0]!.slice(0, 1000) : "Browser operation failed";
@@ -657,7 +660,7 @@ export class PaperclipRunnerToolAuthority {
           const recovery = record(await this.#createTask({
             title: "Restore project browser review capability", assigneeActorId: managers[0]!.id,
             idempotencyKey: `project-browser-recovery:${key}`,
-            description: `Restore browser capability for original task ${this.binding.issueId}. First error: ${message}. Fixed snapshot: ${input.commit ?? "preflight"}, publish directory: ${input.publishDir || "."}. Diagnose this specific gap, preserve existing evidence and approval boundaries, then return verified capability and resume the original reviewer. Do not replay the product matrix.`,
+            description: `Restore browser capability for original task ${this.binding.issueId}. First error: ${message}. Fixed snapshot: ${input.commit ?? "preflight"}, publish directory: ${input.publishDir || "."}. Diagnose this specific gap, preserve existing evidence and approval boundaries, then return verified capability and resume the original reviewer. If the repair resource is outside the current writable root, inspect list_workspaces and select an existing authorized workspace that covers it; verify get_workspace in the resumed turn. Preserve assignment, project and dependencies. Request new authority only when no existing authorized workspace covers the resource. Do not replay the product matrix.`,
           }, null));
           const recoveryTask = record(recovery.task);
           if (typeof recoveryTask.id !== "string") throw new Error("Browser recovery task was not confirmed");
